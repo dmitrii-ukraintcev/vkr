@@ -1,0 +1,1214 @@
+\appendix{Фрагменты исходного кода программы}
+
+%main.tex
+%\lstinputlisting[language=Tex, frame=none]{main.tex}
+%
+%ТехПроект.tex
+%\lstinputlisting[language=Tex, frame=none]{ТехПроект.tex}
+
+\begin{lstlisting}[language=PHP, frame=none]
+<?php
+
+namespace src;
+
+use mysqli;
+
+final class DatabaseConnection
+{
+	private static $instance = null;
+	private static $connection;
+	
+	static function getInstance()
+	{
+		if (is_null(self::$instance)) {
+			self::$instance = new DatabaseConnection();
+		}
+		return self::$instance;
+	}
+	
+	static function connect($hostname, $user, $password, $dbName)
+	{
+		self::$connection = new mysqli($hostname, $user, $password, $dbName);
+	}
+	
+	function getConnection()
+	{
+		return self::$connection;
+	}
+	
+	private function __construct()
+	{
+	}
+	
+	private function __clone()
+	{
+	}
+}
+
+<?php
+
+declare(strict_types=1);
+
+namespace src;
+
+use mysqli;
+
+abstract class Entity
+{
+	public int $id;
+	protected $dbConn;
+	protected static string $tableName;
+	protected array $fields = [];
+	protected array $primaryKeys = ['id'];
+	
+	abstract protected function initFields(): void;
+	
+	protected function __construct($dbConn)
+	{
+		$this->dbConn = $dbConn;
+		$this->initFields();
+	}
+	
+	public static function add($dbConn, $data): static
+	{
+		$className = static::class;
+		
+		$object = new $className($dbConn);
+		$object->setFieldValues((array) $data);
+		$object->insert();
+		
+		return $object;
+	}
+	
+	public function update(mixed $data): void
+	{
+		$this->setFieldValues((array) $data);
+		$this->save();
+	}
+	
+	public static function getAll($dbConn, array $conditions = []): array
+	{
+		return static::getObjects($dbConn, $conditions);
+	}
+	
+	public static function getByField($dbConn, string $fieldName, $fieldValue): ?static
+	{
+		$objects = static::getObjects($dbConn, [$fieldName => $fieldValue]);
+		return $objects[0] ?? null;
+	}
+	
+	protected function setFieldValues(array $data): void
+	{
+		foreach ($this->primaryKeys as $keyName) {
+			if (array_key_exists($keyName, $data)) {
+				$this->$keyName = $data[$keyName];
+			}
+		}
+		
+		foreach ($this->fields as $fieldName) {
+			if (array_key_exists($fieldName, $data)) {
+				$this->$fieldName = $data[$fieldName];
+			}
+		}
+	}
+	
+	protected function insert(): void
+	{
+		$parameterValues = [];
+		$parameterTypes = '';
+		
+		foreach ($this->fields as $field) {
+			$parameterValues[] = $this->$field;
+			$parameterTypes .= self::getType($this->$field);
+		}
+		
+		$fieldNames = implode(', ', $this->fields);
+		$parameters = implode(', ', array_fill(0, count($this->fields), '?'));
+		
+		$sql = "INSERT INTO " . static::$tableName . " ($fieldNames) VALUES ($parameters)";
+		
+		$stmt = $this->dbConn->prepare($sql);
+		$stmt->bind_param($parameterTypes, ...$parameterValues);
+		$stmt->execute();
+		
+		$this->id = $this->dbConn->insert_id;
+		
+		$stmt->close();
+	}
+	
+	protected function save(): void
+	{
+		$fieldBindings = [];
+		$keyBindings = [];
+		$parameterValues = [];
+		$parameterTypes = '';
+		
+		foreach ($this->fields as $field) {
+			$fieldBindings[] = $field . ' = ?';
+			$parameterValues[] = $this->$field;
+			$parameterTypes .= self::getType($this->$field);
+		}
+		
+		foreach ($this->primaryKeys as $key) {
+			$keyBindings[] = $key . ' = ?';
+			$parameterValues[] = $this->$key;
+			$parameterTypes .= self::getType($this->$key);
+		}
+		
+		$fieldBindingsString = implode(', ', $fieldBindings);
+		$keyBindingsString = implode(' AND ', $keyBindings);
+		
+		$sql = "UPDATE " . static::$tableName . " SET $fieldBindingsString WHERE $keyBindingsString";
+		
+		$stmt = $this->dbConn->prepare($sql);
+		$stmt->bind_param($parameterTypes, ...$parameterValues);
+		$stmt->execute();
+		
+		$stmt->close();
+	}
+	
+	public function delete(): void
+	{
+		$keyBindings = [];
+		$parameterValues = [];
+		$parameterTypes = '';
+		
+		foreach ($this->primaryKeys as $key) {
+			$keyBindings[] = $key . ' = ?';
+			$parameterValues[] = $this->$key;
+			$parameterTypes .= self::getType($this->$key);
+		}
+		
+		$keyBindingsString = join(' AND ', $keyBindings);
+		
+		$sql = "DELETE FROM " . static::$tableName . " WHERE $keyBindingsString";
+		
+		$stmt = $this->dbConn->prepare($sql);
+		$stmt->bind_param($parameterTypes, ...$parameterValues);
+		$stmt->execute();
+		
+		$stmt->close();
+	}
+	
+	private static function getData($dbConn, array $conditions = []): array
+	{
+		$sql = "SELECT * FROM " . static::$tableName;
+		$fieldBindings = [];
+		$types = '';
+		$values = [];
+		
+		if ($conditions) {
+			foreach ($conditions as $fieldName => $fieldValue) {
+				$fieldBindings[] = "$fieldName = ?";
+				$types .= self::getType($fieldValue);
+				$values[] = $fieldValue;
+			}
+			$sql .= ' WHERE ' . implode(' AND ', $fieldBindings);
+		}
+		
+		$stmt = $dbConn->prepare($sql);
+		
+		if ($conditions) {
+			$stmt->bind_param($types, ...$values);
+		}
+		
+		$stmt->execute();
+		$data = $stmt->get_result()->fetch_all(MYSQLI_ASSOC);
+		
+		$stmt->close();
+		return $data;
+	}
+	
+	private static function getObjects($dbConn, array $conditions = []): array
+	{
+		$data = static::getData($dbConn, $conditions);
+		$objects = [];
+		
+		if ($data) {
+			$className = static::class;
+			foreach ($data as $objectData) {
+				$object = new $className($dbConn);
+				$object->setFieldValues($objectData, true);
+				$objects[] = $object;
+			}
+		}
+		
+		return $objects;
+	}
+	
+	private static function getType($value): string
+	{
+		if (is_null($value)) {
+			return 's';
+		} elseif (is_int($value)) {
+			return 'i';
+		} elseif (is_float($value)) {
+			return 'd';
+		} elseif (is_string($value)) {
+			return 's';
+		} else {
+			return 'b';
+		}
+	}
+}
+
+<?php
+
+declare(strict_types=1);
+
+namespace src;
+
+abstract class ContentEntity extends Entity
+{
+	public string $title;
+	public string $url;
+	protected string $entityName;
+	protected string $controllerName;
+	protected ?string $updateAction = null;
+	
+	protected function initFields(): void
+	{
+		$this->fields = [
+		'title'
+		];
+	}
+	
+	protected function setFieldValues(array $data, bool $fromDatabase = false): void
+	{
+		parent::setFieldValues($data);
+		
+		if ($fromDatabase) {
+			$this->url = Route::getByField($this->dbConn, $this->entityName . '_id', $this->id)->path;
+		}
+	}
+	
+	public static function add($dbConn, $data): static
+	{
+		$object = parent::add($dbConn, $data);
+		$object->manageRoute();
+		$object->afterInsert($data);
+		
+		return $object;
+	}
+	
+	public function update($data): void
+	{
+		parent::update($data);
+		$this->manageRoute();
+		$this->afterUpdate($data);
+	}
+	
+	protected function manageRoute(): void
+	{
+		$this->url = $this->generateUrl();
+		$route = Route::getByField($this->dbConn, $this->entityName . '_id', $this->id);
+		
+		if ($route) {
+			$route->updatePath($this->url);
+		} else {
+			Route::add($this->dbConn, new RouteData($this->url, $this->controllerName, $this->entityName, $this->id, $this->updateAction));
+		}
+	}
+	
+	protected function generateUrl(): string
+	{
+		$url = strtolower(str_replace(' ', '-', $this->title));
+		
+		$parentUrl = $this->getParentUrlPath();
+		if ($parentUrl) {
+			$url = $parentUrl . '/' . $url;
+		} else {
+			$url = '/' . $this->entityName . '/' . $url;
+		}
+		
+		return $url;
+	}
+	
+	private function getParentUrlPath(): ?string
+	{
+		$parent = 'parent_' . $this->entityName . '_id';
+		if (property_exists($this, $parent) && $this->$parent !== null && $this->$parent != 1) {
+			return Route::getByField($this->dbConn, $this->entityName . '_id', $this->$parent)->path;
+		}
+		return null;
+	}
+	
+	abstract protected function afterInsert($data): void;
+	abstract protected function afterUpdate($data): void;
+}
+
+<?php
+
+declare(strict_types=1);
+
+namespace src;
+
+use modules\user\admin\models\User;
+
+class Auth
+{
+	function verifyLogin($dbConn, string $username, string $password): bool
+	{
+		$user = User::getByField($dbConn, 'username', $username);
+		
+		if (!$user->id) {
+			return false;
+		}
+		if (!password_verify($password, $user->password_hash)) {
+			return false;
+		}
+		
+		$_SESSION['current_user_id'] = $user->id;
+		$_SESSION['is_admin'] = $user->role == 'admin' ? true : false;
+		return true;
+	}
+}
+
+<?php
+
+declare(strict_types=1);
+
+namespace src;
+
+class Route extends Entity
+{
+	protected static string $tableName = 'routes';
+	public string $path;
+	public string $controller;
+	public ?string $action;
+	public ?int $page_id = null;
+	public ?int $post_id = null;
+	public ?int $category_id = null;
+	public ?int $tag_id = null;
+	
+	protected function initFields(): void
+	{
+		$this->fields = [
+		'path',
+		'controller',
+		'action',
+		'page_id',
+		'post_id',
+		'category_id',
+		'tag_id'
+		];
+	}
+	
+	public static function add($dbConn, $data): static
+	{
+		$route = new Route($dbConn);
+		$route->setFieldValues([
+		'path' => $data->url,
+		'controller' => $data->controller,
+		$data->entity . '_id' => $data->entity_id,
+		'action' => $data->action
+		]);
+		$route->insert();
+		
+		return $route;
+	}
+	
+	public function updatePath($newPath): void
+	{
+		$this->path = $newPath;
+		$this->save();
+	}
+}
+
+<?php
+
+namespace modules\page\models;
+
+use modules\menu\admin\models\MenuItem;
+use src\ContentEntity;
+use src\Route;
+
+class Page extends ContentEntity
+{
+	public function __construct($dbConn)
+	{
+		parent::__construct($dbConn);
+	}
+	
+	protected static string $tableName = 'pages';
+	protected string $entityName = 'page';
+	protected string $controllerName = 'page';
+	
+	public string $content;
+	public ?int $parent_page_id;
+	
+	protected function initFields(): void
+	{
+		parent::initFields();
+		$this->fields[] = 'content';
+		$this->fields[] = 'parent_page_id';
+	}
+	
+	protected function afterInsert($data): void
+	{
+	}
+	
+	protected function afterUpdate($data): void
+	{
+		$this->updateMenuItems();
+		
+		$childPages = $this->getChildPages();
+		foreach ($childPages as $page) {
+			$page->manageRoute();
+			$page->updateMenuItems();
+		}
+	}
+	
+	private function updateMenuItems(): void
+	{
+		$route = Route::getByField($this->dbConn, 'page_id', $this->id);
+		$menuItem = MenuItem::getByField($this->dbConn, 'route_id', $route->id);
+		
+		if ($menuItem) {
+			$menuItem->updateMenuItemUrl($this->url);
+		}
+	}
+	
+	public function getChildPages(): array
+	{
+		return Page::getAll($this->dbConn, ['parent_page_id' => $this->id]);
+	}
+}
+
+<?php
+
+namespace modules\post\models;
+
+use modules\category\models\Category;
+use modules\post\models\PostCategories;
+use modules\user\admin\models\User;
+use mysqli;
+use src\ContentEntity;
+
+class Post extends ContentEntity
+{
+	protected static string $tableName = 'posts';
+	protected string $entityName = 'post';
+	protected string $controllerName = 'post';
+	
+	public string $content;
+	public int $author_id;
+	public User $author;
+	public $updated_datetime;
+	public array $categories = [];
+	
+	protected function initFields(): void
+	{
+		parent::initFields();
+		$this->fields = array_merge($this->fields, [
+		'content',
+		'author_id',
+		'updated_datetime'
+		]);
+	}
+	
+	protected function setFieldValues(array $data, bool $fromDatabase = false): void
+	{
+		parent::setFieldValues($data, $fromDatabase);
+		
+		if ($fromDatabase) {
+			$this->categories = $this->getCategories();
+			$this->author = User::getByField($this->dbConn, 'id', $this->author_id);
+		}
+	}
+	
+	protected function afterInsert($data): void
+	{
+		$this->updatePostCategories($data->categories);
+	}
+	
+	
+	protected function afterUpdate($data): void
+	{
+		$this->updatePostCategories($data->categories);
+	}
+	
+	private function updatePostCategories(array $categories): void
+	{
+		$postId = $this->id;
+		$currentCategories = PostCategories::getAll($this->dbConn, ['post_id' => $postId]);
+		
+		foreach ($currentCategories as $category) {
+			$category->delete();
+		}
+		
+		foreach ($categories as $categoryId) {
+			$data = (object)['post_id' => $postId, 'category_id' => (int)$categoryId];
+			PostCategories::add($this->dbConn, $data);
+		}
+		
+		$this->categories = $this->getCategories();
+	}
+	
+	public function getCategories(): array
+	{
+		$categoryIds = $this->getCategoryIds();
+		
+		$categories = [];
+		foreach ($categoryIds as $categoryId) {
+			$category = Category::getByField($this->dbConn, 'id', $categoryId);
+			$categories[] = $category;
+		}
+		
+		return $categories;
+	}
+	
+	public function getCategoryIds(): array
+	{
+		$postCategories = PostCategories::getAll($this->dbConn, ['post_id' => $this->id]);
+		return array_map(fn ($postCategory) => $postCategory->category_id, $postCategories);
+	}
+	
+	public static function getPostsByCategory(mysqli $dbConn, int $categoryId): array
+	{
+		$postCategories = PostCategories::getAll($dbConn, ['category_id' => $categoryId]);
+		$postIds = array_map(fn ($postCategory) => $postCategory->post_id, $postCategories);
+		
+		$posts = [];
+		foreach ($postIds as $postId) {
+			$post = Post::getByField($dbConn, 'id', $postId);
+			$posts[] = $post;
+		}
+		
+		return $posts;
+	}
+}
+
+<?php
+
+namespace modules\menu\admin\models;
+
+use src\Entity;
+
+class Menu extends Entity
+{
+	protected static string $tableName = 'menus';
+	public string $name;
+	
+	protected function initFields(): void
+	{
+		$this->fields = [
+		'name'
+		];
+	}
+	
+	public function getMenuItems(): array
+	{
+		$menuItems = MenuItem::getAll($this->dbConn, ['menu_id' => $this->id]);
+		
+		usort($menuItems, fn($a, $b) => $a->order_num <=> $b->order_num);
+		
+		return $menuItems;
+	}
+	
+	public function getAddedPageIds(): array
+	{
+		$sql = "SELECT page_id FROM routes INNER JOIN menu_items ON menu_items.route_id=routes.id WHERE menu_items.menu_id=?";
+		// $sql = "SELECT page_id FROM routes INNER JOIN menu_items ON menu_items.url=routes.path WHERE menu_items.menu_id=$menu_id";
+		$stmt = $this->dbConn->prepare($sql);
+		$stmt->bind_param('i', $this->id);
+		$stmt->execute();
+		$result = $stmt->get_result();
+		
+		$addedPageIds = [];
+		while ($row = $result->fetch_assoc()) {
+			$addedPageIds[] = $row['page_id'];
+		}
+		
+		return $addedPageIds;
+	}
+	
+	private function getNextOrderNum(): int
+	{
+		$sql = "SELECT MAX(order_num) AS max_order_num FROM menu_items WHERE menu_id=?";
+		$stmt = $this->dbConn->prepare($sql);
+		$stmt->bind_param('i', $this->id);
+		$stmt->execute();
+		$result = $stmt->get_result();
+		$row = $result->fetch_assoc();
+		
+		$maxOrderNum = $row['max_order_num'];
+		
+		return $maxOrderNum !== null ? $maxOrderNum + 1 : 1;
+	}
+	
+	public function addMenuItem(MenuItemData $data) : MenuItem
+	{
+		$menuItem = new MenuItem($this->dbConn);
+		
+		$menuItem->setFieldValues([
+		'menu_id' => $this->id,
+		'title' => $data->title,
+		'url' => $data->url,
+		'order_num' => $this->getNextOrderNum(),
+		'route_id' => $data->route_id,
+		'parent_menu_item_id' => $data->parent_menu_item_id
+		]);
+		$menuItem->insert();
+		
+		return $menuItem;
+	}
+	
+	public function updateMenuItemsOrder($newOrder)
+	{
+		foreach ($newOrder as $index => $itemId) {
+			$itemId = (int)$itemId;
+			$menu_item = MenuItem::getByField($this->dbConn, 'id', $itemId);
+			$menu_item->setFieldValues(['order_num' => $index + 1]);
+			$menu_item->save();
+		}
+	}
+}
+
+<?php
+
+namespace modules\menu\admin\models;
+
+use src\Entity;
+
+class MenuItem extends Entity
+{
+	protected static string $tableName = 'menu_items';
+	public int $menu_id;
+	public string $title;
+	public string $url;
+	public ?int $parent_menu_item_id;
+	public ?int $route_id;
+	public int $order_num;
+	public array $child_menu_items = [];
+	
+	protected function initFields(): void
+	{
+		$this->fields = [
+		'menu_id',
+		'title',
+		'url',
+		'parent_menu_item_id',
+		'route_id',
+		'order_num'
+		];
+	}
+	
+	protected function setFieldValues(array $data, bool $fromDatabase = false): void
+	{
+		parent::setFieldValues($data);
+		
+		if ($fromDatabase) {
+			$this->child_menu_items = $this->getChildMenuItems();
+		}
+	}
+	
+	public function getChildMenuItems(): array
+	{
+		return MenuItem::getAll($this->dbConn, ['parent_menu_item_id' => $this->id]);
+	}
+	
+	public function renderMenuItem()
+	{
+		$html = '<li class="list-group-item" id="' . $this->id . '">';
+		$html .= $this->title;
+		$html .= ' <a href="/admin/index.php?module=menu&action=editMenuItem&id=' . $this->id . '">Изменить</a> ';
+		$html .= ' <a href="/admin/index.php?module=menu&action=deleteMenuItem&id=' . $this->id . '">Удалить</a> ';
+		
+		if (!empty($this->child_menu_items)) {
+			
+			$html .= '<button class="btn btn-sm btn-primary float-end" data-bs-toggle="collapse" data-bs-target="#submenu' . $this->id . '">Подробнее</button>';
+			$html .= '<ul class="menu-list list-group collapse" id="submenu' . $this->id . '">';
+			
+			foreach ($this->child_menu_items as $child) {
+				$html .= $child->renderMenuItem();
+			}
+			$html .= '</ul>';
+		}
+		$html .= '</li>';
+		
+		return $html;
+	}
+	
+	public function update($data): void
+	{
+		$this->setFieldValues([
+		'title' => $data->title,
+		'url' => $data->url,
+		'parent_menu_item_id' => $data->parent_menu_item_id,
+		'route_id' => $data->route_id
+		]);
+		$this->save();
+	}
+	
+	public function updateMenuItemUrl(string $url): void
+	{
+		$this->url = $url;
+		$this->save();
+	}
+}
+
+<?php
+
+namespace modules\category\models;
+
+use src\ContentEntity;
+
+class Category extends ContentEntity
+{
+	protected static string $tableName = 'categories';
+	protected string $entityName = 'category';
+	protected string $controllerName = 'post';
+	protected ?string $updateAction = 'showByCategory';
+	
+	public ?int $parent_category_id;
+	
+	protected function initFields(): void
+	{
+		parent::initFields();
+		$this->fields[] = 'parent_category_id';
+	}
+	
+	protected function afterInsert($data): void
+	{
+	}
+	
+	protected function afterUpdate($data): void
+	{
+		$childCategories = $this->getChildCategories();
+		foreach ($childCategories as $category) {
+			$category->manageRoute();
+		}
+	}
+	
+	public function getChildCategories(): array
+	{
+		return Category::getAll($this->dbConn, ['parent_category_id' => $this->id]);
+	}
+}
+
+<?php
+
+namespace modules\dashboard\admin\controllers;
+
+use src\Controller;
+use src\Auth;
+
+class DashboardController extends Controller
+{
+	function defaultAction()
+	{
+		header('Location: /admin/index.php?module=page');
+		exit();
+	}
+	
+	function loginAction()
+	{
+		if ($_POST['postAction'] ?? 0) {
+			$username = $_POST['username'] ?? '';
+			$password = $_POST['password'] ?? '';
+			
+			$auth = new Auth();
+			if ($auth->verifyLogin($this->dbConn, $username, $password)) {
+				$_SESSION['logged_in'] = true;
+				header('Location: /admin/');
+				exit();
+			}
+			// var_dump($password);
+			$_SESSION['validation']['error'] = "Username or password is incorrect";
+		}
+		
+		include VIEW_PATH . 'admin/login.php';
+		unset($_SESSION['validation']['error']);
+	}
+}
+
+<?php
+
+declare(strict_types=1);
+
+namespace modules\page\admin\controllers;
+
+use modules\page\models\PageData;
+use src\AdminController;
+use modules\page\models\Page;
+
+class PageController extends AdminController
+{
+	function defaultAction(): void
+	{
+		$data['pages'] = Page::getAll($this->dbConn);
+		
+		$this->template->renderView($data, 'page/admin/views/page_list');
+	}
+	
+	function editPageAction(): void
+	{
+		$pageId = $_GET['id'];
+		$page = Page::getByField($this->dbConn, 'id', $pageId);
+		
+		if ($_POST['action'] ?? 0) {
+			$page->update(new PageData(
+			$_POST['title'],
+			$_POST['content'],
+			(int)$_POST['parent_page_id']
+			));
+		}
+		
+		$data['page'] = $page;
+		$data['pages'] = Page::getAll($this->dbConn);
+		$data['child_pages'] = $page->getChildPages();
+		
+		$pages = Page::getAll($this->dbConn);
+		$child_pages = $page->getChildPages();
+		// $this->template->renderView($data, 'page/admin/views/page_edit');
+		include VIEW_PATH . 'admin/content_editor.php';
+	}
+	
+	function addPageAction(): void
+	{
+		if ($_POST['action'] ?? 0) {
+			Page::add($this->dbConn, new PageData(
+			$_POST['title'],
+			$_POST['content'],
+			(int)$_POST['parent_page_id']
+			));
+			
+			header('Location: /admin/');
+			exit();
+		}
+		
+		$data['pages'] = Page::getAll($this->dbConn);
+		$this->template->renderView($data, 'page/admin/views/page_add');
+	}
+	
+	function deletePageAction(): void
+	{
+		$pageId = $_GET['id'];
+		$page = Page::getByField($this->dbConn, 'id', $pageId);
+		$page->delete();
+		
+		header('Location: /admin/');
+	}
+}
+
+<?php
+
+namespace modules\post\admin\controllers;
+
+use modules\category\models\Category;
+use modules\post\models\PostData;
+use src\AdminController;
+use modules\post\models\Post;
+
+class PostController extends AdminController
+{
+	function defaultAction(): void
+	{
+		$data['posts'] = Post::getAll($this->dbConn);
+		
+		$this->template->renderView($data, 'post/admin/views/post_list');
+	}
+	
+	function addPostAction(): void
+	{
+		if ($_POST['action'] ?? 0 == 1) {
+			Post::add($this->dbConn, new PostData(
+			$_POST['title'],
+			$_POST['content'],
+			$_SESSION['current_user_id'],
+			$_POST['categories'] ?? [1]
+			));
+			
+			header('Location: /admin/index.php?module=post');
+			exit();
+		}
+		
+		$categories = Category::getAll($this->dbConn);
+		array_shift($categories);
+		
+		$data['categories'] = $categories;
+		$this->template->renderView($data, 'post/admin/views/post_add');
+	}
+	
+	function editPostAction(): void
+	{
+		$postId = $_GET['id'];
+		$post = Post::getByField($this->dbConn, 'id', $postId);
+		
+		if ($_POST['action'] ?? 0) {
+			$post->update(new PostData(
+			$_POST['title'],
+			$_POST['content'],
+			$_SESSION['current_user_id'],
+			$_POST['categories'] ?? [1]
+			));
+		}
+		
+		$data['post'] = $post;
+		$data['post_categories'] = $post->getCategoryIds();
+		
+		$categories = Category::getAll($this->dbConn);
+		array_shift($categories);
+		
+		$data['categories'] = $categories;
+		// $page = $pageObj;
+		// $pages = $pageObj->getAll();
+		// $child_pages = $pageObj->getChildPages();
+		$this->template->renderView($data, 'post/admin/views/post_edit');
+		// include VIEW_PATH . 'admin/content_editor.php';
+	}
+	
+	function deletePostAction(): void
+	{
+		$postId = $_GET['id'];
+		$postObj = Post::getByField($this->dbConn, 'id', $postId);
+		$postObj->delete();
+		
+		header('Location: /admin/index.php?module=post');
+	}
+}
+
+<?php
+
+declare(strict_types=1);
+
+namespace modules\menu\admin\controllers;
+
+use modules\menu\admin\models\Menu;
+use src\AdminController;;
+use modules\menu\admin\models\MenuItem;
+use modules\menu\admin\models\MenuItemData;
+use modules\page\models\Page;
+use src\Route;
+
+class MenuController extends AdminController
+{
+	function defaultAction(): void
+	{
+		$data['menus'] = Menu::getAll($this->dbConn);
+		
+		$this->template->renderView($data, 'menu/admin/views/menu_list');
+	}
+	
+	function editMenuAction(): void
+	{
+		$menuId = $_GET['id'];
+		
+		$menu = Menu::getByField($this->dbConn, 'id', $menuId);
+		
+		$data['menu'] = $menu;
+		$data['menu_items'] = $menu->getMenuItems();
+		
+		$this->template->renderView($data, 'menu/admin/views/menu_edit');
+	}
+	
+	function editMenuItemAction(): void
+	{
+		$menuItemId = $_GET['id'];
+		
+		$menuItem = MenuItem::getByField($this->dbConn, 'id', $menuItemId);
+		
+		if ($_POST['action'] ?? 0) {
+			
+			$parentMenuItemId = (int)$_POST['parent_menu_item_id'];
+			if ($parentMenuItemId === 0) {
+				$parentMenuItemId = null;
+			}
+			$menuItem->update(new MenuItemData($_POST['title'], $menuItem->url, $parentMenuItemId));
+		}
+		
+		$data['menu_item'] = $menuItem;
+		$data['menu_items'] = MenuItem::getAll($this->dbConn, ['menu_id' => $menuItem->menu_id]);
+		
+		$this->template->renderView($data, 'menu/admin/views/menu_item_edit');
+	}
+	
+	function addMenuItemAction(): void
+	{
+		$menuId = $_GET['id'];
+		
+		$menu = Menu::getByField($this->dbConn, 'id', $menuId);
+		
+		if ($_POST['action'] ?? 0) {
+			
+			if ($_GET['type'] == 'page') {
+				foreach ($_POST['page_ids'] as $pageId) {
+					$page = Page::getByField($this->dbConn, 'id', $pageId);
+					$route = Route::getByField($this->dbConn, 'page_id', $pageId);
+					
+					$menu->addMenuItem(new MenuItemData(
+					$page->title,
+					$page->url,
+					route_id: $route->id
+					));
+				}
+			} else if ($_GET['type'] == 'link') {
+				$parentMenuItemId = (int)$_POST['parent_menu_item_id'];
+				if ($parentMenuItemId === 0) {
+					$parentMenuItemId = null;
+				}
+				$menu->addMenuItem(new MenuItemData(
+				$_POST['title'],
+				$_POST['url'],
+				$parentMenuItemId
+				));
+			}
+			header("Location: /admin/index.php?module=menu&action=editMenu&id=$menuId");
+			exit();
+		}
+		
+		$data['pages'] = Page::getAll($this->dbConn);
+		$data['menu_items'] = $menu->getMenuItems();
+		$data['added_page_ids'] = $menu->getAddedPageIds();
+		
+		if ($_GET['type'] == 'page') {
+			$this->template->renderView($data, 'menu/admin/views/menu_item_add_page');
+		} else if ($_GET['type'] == 'link') {
+			$this->template->renderView($data, 'menu/admin/views/menu_item_add');
+		}
+	}
+	
+	function deleteMenuItemAction(): void
+	{
+		$menuItemId = $_GET['id'];
+		$menuItem = MenuItem::getByField($this->dbConn, 'id', $menuItemId);
+		$menuItem->delete();
+		
+		header("Location: /admin/index.php?module=menu&action=editMenu&id=$menuItem->menu_id");
+	}
+	
+	function updateMenuOrderAction(): void
+	{
+		$newOrder = $_POST['order'];
+		$menu = new Menu($this->dbConn);
+		$menu->updateMenuItemsOrder($newOrder);
+	}
+}
+
+<?php
+
+namespace modules\category\admin\controllers;
+
+use modules\category\models\Category;
+use modules\category\models\CategoryData;
+use src\AdminController;
+
+class CategoryController extends AdminController
+{
+	function defaultAction(): void
+	{
+		$categories = Category::getAll($this->dbConn);
+		array_shift($categories);
+		$data['categories'] = $categories;
+		
+		$this->template->renderView($data, 'category/admin/views/category_list');
+	}
+	
+	function editCategoryAction(): void
+	{
+		$categoryId = $_GET['id'];
+		$category = Category::getByField($this->dbConn, 'id', $categoryId);
+		
+		if ($_POST['action'] ?? 0) {
+			
+			if (empty($_POST['parent_category_id'])) {
+				unset($_POST['parent_category_id']);
+			}
+			
+			$category->update(new CategoryData(
+			$_POST['title'],
+			$_POST['parent_category_id'] ?? null
+			));
+		}
+		
+		$data['category'] = $category;
+		$data['child_categories'] = $category->getChildCategories();
+		$categories = Category::getAll($this->dbConn);
+		array_shift($categories);
+		$data['categories'] = $categories;
+		$this->template->renderView($data, 'category/admin/views/category_edit');
+	}
+	
+	function addCategoryAction(): void
+	{
+		if ($_POST['action'] ?? 0) {
+			
+			if (empty($_POST['parent_category_id'])) {
+				unset($_POST['parent_category_id']);
+			}
+			
+			Category::add($this->dbConn, new CategoryData(
+			$_POST['title'],
+			$_POST['parent_category_id'] ?? null
+			));
+			
+			header('Location: /admin/index.php?module=category');
+			exit();
+		}
+		
+		$categories = Category::getAll($this->dbConn);
+		array_shift($categories);
+		$data['categories'] = $categories;
+		$this->template->renderView($data, 'category/admin/views/category_add');
+	}
+	
+	function deleteCategoryAction(): void
+	{
+		$categoryId = $_GET['id'];
+		$category = Category::getByField($this->dbConn, 'id', $categoryId);
+		$category->delete();
+		
+		header('Location: /admin/index.php?module=category');
+	}
+}
+
+<?php
+
+declare(strict_types=1);
+namespace src;
+
+use modules\menu\admin\models\Menu;
+use modules\menu\admin\models\MenuItem;
+use mysqli;
+
+class Template
+{
+	private string $templatePath;
+	private string $context;
+	private mysqli $dbConn;
+	
+	function __construct(mysqli $dbConn, string $templatePath, string $context = 'site')
+	{
+		$this->dbConn = $dbConn;
+		$this->templatePath = $templatePath;
+		$this->context = $context;
+	}
+	
+	function renderView(array $data, ?string $view = null, ?string $selected_theme = null) : void
+	{
+		extract($data);
+		
+		
+		if ($this->context === 'admin'){
+			include VIEW_PATH . $this->templatePath . ".php";
+		}
+		else{
+			$menus = Menu::getAll($dbConn);
+			// $index = array_search('header_menu', array_column($menus, 'name'));
+			// $headerMenu = $index !== false ? $menus[$index] : null;
+			include THEMES_PATH . $selected_theme . '/' . $this->templatePath . ".php";
+		}
+	}
+}
+
+	
+\end{lstlisting}
+
+\ifВКР{
+\newpage
+\addcontentsline{toc}{section}{На отдельных листах (CD-RW в прикрепленном конверте)}
+\begin{center}
+\textbf{Место для диска}
+\end{center}
+}\fi
